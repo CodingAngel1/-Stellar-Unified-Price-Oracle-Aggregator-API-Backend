@@ -194,6 +194,20 @@ export const wsSubscribeEventsTotal = new client.Counter({
 });
 register.registerMetric(wsSubscribeEventsTotal);
 
+export const wsClientMessagesTotal = new client.Counter({
+  name: 'ws_api_client_messages_total',
+  help: 'Price messages per WebSocket connection, split by subscription-filter delivery result',
+  labelNames: ['client', 'result'],
+});
+register.registerMetric(wsClientMessagesTotal);
+
+export const wsClientSubscriptions = new client.Gauge({
+  name: 'ws_api_client_subscriptions',
+  help: 'Current number of subscribed assets per WebSocket connection; 0 means the connection receives no price frames',
+  labelNames: ['client'],
+});
+register.registerMetric(wsClientSubscriptions);
+
 export const apiCallsByEndpoint = new client.Counter({
   name: 'api_calls_by_endpoint_total',
   help: 'Total API calls grouped by endpoint, method, and status',

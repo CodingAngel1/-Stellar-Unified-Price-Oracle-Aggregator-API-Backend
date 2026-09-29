@@ -47,6 +47,8 @@ export interface ConnectedMessage {
   sequenceId: number;
   replaySupported: boolean;
   bufferSize: number;
+  /** Price frames are only delivered for subscribed assets; see docs/websocket-message-contract.md */
+  subscriptionRequired?: boolean;
 }
 
 export interface ErrorMessage {
@@ -78,6 +80,10 @@ export interface ReplayCompleteMessage {
   type: ServerMessageType.ReplayComplete;
   replayed: number;
   sequenceId: number;
+  /** Assets actually replayed: requested assets intersected with this connection's subscriptions. */
+  assets?: string[];
+  /** Replay scope is always the connection's subscription set. */
+  scope?: 'subscriptions';
 }
 
 export interface PongMessage {

@@ -1,5 +1,6 @@
 import { WebSocketServer as WsServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
+import { randomUUID } from 'crypto';
 import { logger } from '../observability/logger';
 import { validateWebSocketApiKey } from '../governance/auth';
 import { HybridCache } from '../price-serving/cache';
@@ -15,6 +16,8 @@ import {
   wsConnectionDuration,
   wsErrorsTotal,
   wsSubscribeEventsTotal,
+  wsClientMessagesTotal,
+  wsClientSubscriptions,
 } from '../observability/metrics';
 
 // Circular message buffer per asset for replay support
@@ -45,6 +48,7 @@ export class PriceWebSocketServer {
   private guard: WsUpgradeGuard;
   private clients: Set<WebSocket> = new Set();
   private subscriptions: Map<WebSocket, Set<string>> = new Map();
+  private clientIds: Map<WebSocket, string> = new Map();
   private cache: HybridCache<unknown> | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
   // Per-asset circular message buffer for replay on reconnect
@@ -70,8 +74,11 @@ export class PriceWebSocketServer {
       this.guard.onConnect(ip);
 
       const connectedAt = Date.now();
+      const clientId = randomUUID().slice(0, 8);
       this.clients.add(ws);
       this.subscriptions.set(ws, new Set());
+      this.clientIds.set(ws, clientId);
+      wsClientSubscriptions.set({ client: clientId }, 0);
 
       wsConnectionsActive.inc();
       wsConnectionsTotal.inc();
@@ -90,8 +97,7 @@ export class PriceWebSocketServer {
 
       ws.on('close', () => {
         this.guard.onDisconnect(ip);
-        this.clients.delete(ws);
-        this.subscriptions.delete(ws);
+        this.forget(ws);
         wsConnectionsActive.dec();
         wsConnectionDuration.observe((Date.now() - connectedAt) / 1000);
         logger.info(`WS client disconnected (total: ${this.clients.size})`);
@@ -100,8 +106,7 @@ export class PriceWebSocketServer {
       ws.on('error', (err) => {
         wsErrorsTotal.inc();
         logger.error('WS error', err);
-        this.clients.delete(ws);
-        this.subscriptions.delete(ws);
+        this.forget(ws);
       });
 
       ws.send(JSON.stringify({
@@ -110,6 +115,7 @@ export class PriceWebSocketServer {
         sequenceId: globalSequence,
         replaySupported: true,
         bufferSize: MESSAGE_BUFFER_SIZE,
+        subscriptionRequired: true,
       }));
     });
 
@@ -136,6 +142,8 @@ export class PriceWebSocketServer {
         {
           const subs = this.subscriptions.get(ws);
           (m.assets as string[]).forEach((a) => subs?.add(a.toUpperCase()));
+          wsSubscribeEventsTotal.inc({ action: 'subscribe' });
+          this.publishSubscriptionGauge(ws);
           ws.send(JSON.stringify({ type: ServerMessageType.Subscribed, assets: m.assets, sequenceId: globalSequence }));
         }
         break;
@@ -148,6 +156,7 @@ export class PriceWebSocketServer {
           const subs = this.subscriptions.get(ws);
           (m.assets as string[]).forEach((a) => subs?.delete(a.toUpperCase()));
           wsSubscribeEventsTotal.inc({ action: 'unsubscribe' });
+          this.publishSubscriptionGauge(ws);
           wsMessagesTotal.inc({ direction: 'inbound', type: 'unsubscribe' });
           ws.send(JSON.stringify({ type: ServerMessageType.Unsubscribed, assets: m.assets }));
         }
@@ -165,18 +174,21 @@ export class PriceWebSocketServer {
           return;
         }
 
+        const subscribed = this.subscriptions.get(ws) ?? new Set<string>();
         const requestedAssets = assets
           ? (assets as string[]).map((a) => a.toUpperCase())
           : null;
+        // Replay never reaches beyond this connection's subscriptions: assets the
+        // client did not subscribe to are dropped from the request scope, so an
+        // unsubscribed connection replays nothing.
+        const scopeAssets = requestedAssets
+          ? requestedAssets.filter((a) => subscribed.has(a))
+          : Array.from(subscribed);
 
         let replayed = 0;
-        const bufferSources = requestedAssets
-          ? requestedAssets.map((a) => ({ asset: a, buf: this.messageBuffers.get(a) || [] }))
-          : Array.from(this.messageBuffers.entries()).map(([asset, buf]) => ({ asset, buf }));
-
         const missed: BufferedMessage[] = [];
-        for (const { buf } of bufferSources) {
-          for (const entry of buf) {
+        for (const asset of scopeAssets) {
+          for (const entry of this.messageBuffers.get(asset) || []) {
             if (entry.sequenceId > lastSeqRaw) {
               missed.push(entry);
             }
@@ -188,10 +200,18 @@ export class PriceWebSocketServer {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: ServerMessageType.PriceUpdate, replayed: true, sequenceId: entry.sequenceId, data: entry.data }));
             replayed++;
+            const clientId = this.clientIds.get(ws);
+            if (clientId) wsClientMessagesTotal.inc({ client: clientId, result: 'delivered' });
           }
         }
 
-        ws.send(JSON.stringify({ type: ServerMessageType.ReplayComplete, replayed, sequenceId: globalSequence }));
+        ws.send(JSON.stringify({
+          type: ServerMessageType.ReplayComplete,
+          replayed,
+          sequenceId: globalSequence,
+          assets: scopeAssets,
+          scope: 'subscriptions',
+        }));
         break;
       }
       case ClientMessageType.Ping:
@@ -218,16 +238,52 @@ export class PriceWebSocketServer {
     return seq;
   }
 
+  private subscriptionMatches(client: WebSocket, asset: string | undefined): boolean {
+    const subs = this.subscriptions.get(client);
+    return Boolean(subs && subs.size > 0 && asset && subs.has(asset));
+  }
+
+  private countDelivered(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    if (clientId) wsClientMessagesTotal.inc({ client: clientId, result: 'delivered' });
+  }
+
+  private countDropped(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    if (clientId) wsClientMessagesTotal.inc({ client: clientId, result: 'dropped' });
+  }
+
+  private publishSubscriptionGauge(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    const subs = this.subscriptions.get(client);
+    if (clientId && subs) wsClientSubscriptions.set({ client: clientId }, subs.size);
+  }
+
+  private forget(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    this.clients.delete(client);
+    this.subscriptions.delete(client);
+    if (clientId) {
+      this.clientIds.delete(client);
+      wsClientSubscriptions.remove(clientId);
+    }
+  }
+
   broadcast(data: PriceUpdatePayload): void {
-    const asset = data?.asset?.toUpperCase() || '_global';
+    const rawAsset = data?.asset?.toUpperCase();
+    const asset = rawAsset || '_global';
     const seq = this.bufferMessage(asset, data);
     const message = JSON.stringify({ type: ServerMessageType.PriceUpdate, sequenceId: seq, ...data });
     let sent = 0;
     this.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-        sent++;
+      if (client.readyState !== WebSocket.OPEN) return;
+      if (!this.subscriptionMatches(client, rawAsset)) {
+        this.countDropped(client);
+        return;
       }
+      client.send(message);
+      sent++;
+      this.countDelivered(client);
     });
     if (sent > 0) wsMessagesTotal.inc({ direction: 'outbound', type: 'price_update' }, sent);
   }
@@ -240,11 +296,13 @@ export class PriceWebSocketServer {
 
     this.clients.forEach((client) => {
       if (client.readyState !== WebSocket.OPEN) return;
-      const subs = this.subscriptions.get(client);
-      if (!subs || subs.size === 0 || (asset && subs.has(asset))) {
-        client.send(message);
-        sent++;
+      if (!this.subscriptionMatches(client, asset)) {
+        this.countDropped(client);
+        return;
       }
+      client.send(message);
+      sent++;
+      this.countDelivered(client);
     });
 
     if (sent > 0) wsMessagesTotal.inc({ direction: 'outbound', type: ServerMessageType.PriceUpdate }, sent);
@@ -281,8 +339,9 @@ export class PriceWebSocketServer {
   stop(): void {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.wss?.close();
-    this.clients.clear();
-    this.subscriptions.clear();
+    for (const client of Array.from(this.clients)) {
+      this.forget(client);
+    }
     this.messageBuffers.clear();
   }
 }
