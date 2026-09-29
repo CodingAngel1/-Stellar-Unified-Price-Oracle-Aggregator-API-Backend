@@ -9,12 +9,12 @@ describe('Admin: API Usage Statistics Endpoint', () => {
   });
 
   describe('GET /admin/usage - Per-key usage statistics', () => {
-    it('should return empty array when no keys exist', () => {
+    it('should return empty array when no keys exist', async () => {
       const keys = apiKeyManager.getAllKeys();
       expect(Array.isArray(keys)).toBe(true);
     });
 
-    it('should return usage stats for generated keys', () => {
+    it('should return usage stats for generated keys', async () => {
       const generated = apiKeyManager.generateKey(100, 'test-key', 'pro', 'viewer');
       const keys = apiKeyManager.getAllKeys();
 
@@ -27,14 +27,14 @@ describe('Admin: API Usage Statistics Endpoint', () => {
       expect(keyStats?.isActive).toBe(true);
     });
 
-    it('should track request count on rate limit check', () => {
+    it('should track request count on rate limit check', async () => {
       const key = apiKeyManager.generateKey(10, 'test', 'free', 'viewer');
       const keys = apiKeyManager.getAllKeys();
       const keyHashBefore = keys[keys.length - 1].keyHash;
 
-      apiKeyManager.checkRateLimit(key.key);
-      apiKeyManager.checkRateLimit(key.key);
-      apiKeyManager.checkRateLimit(key.key);
+      await apiKeyManager.checkRateLimit(key.key);
+      await apiKeyManager.checkRateLimit(key.key);
+      await apiKeyManager.checkRateLimit(key.key);
 
       const keysAfter = apiKeyManager.getAllKeys();
       const updatedStats = keysAfter.find((k) => k.keyHash === keyHashBefore);
@@ -44,14 +44,14 @@ describe('Admin: API Usage Statistics Endpoint', () => {
       expect(typeof updatedStats?.lastUsed).toBe('number');
     });
 
-    it('should show different request counts per key', () => {
+    it('should show different request counts per key', async () => {
       const key1 = apiKeyManager.generateKey(100, 'key1', 'free', 'viewer');
       const key2 = apiKeyManager.generateKey(100, 'key2', 'pro', 'viewer');
 
-      apiKeyManager.checkRateLimit(key1.key);
-      apiKeyManager.checkRateLimit(key2.key);
-      apiKeyManager.checkRateLimit(key2.key);
-      apiKeyManager.checkRateLimit(key2.key);
+      await apiKeyManager.checkRateLimit(key1.key);
+      await apiKeyManager.checkRateLimit(key2.key);
+      await apiKeyManager.checkRateLimit(key2.key);
+      await apiKeyManager.checkRateLimit(key2.key);
 
       const allKeys = apiKeyManager.getAllKeys();
       const stats1 = allKeys.find((k) => k.keyPrefix === key1.keyPrefix);
@@ -61,12 +61,12 @@ describe('Admin: API Usage Statistics Endpoint', () => {
       expect(stats2?.requestCount).toBe(3);
     });
 
-    it('should include rate limit hits in response', () => {
+    it('should include rate limit hits in response', async () => {
       const key = apiKeyManager.generateKey(2, 'limited', 'free', 'viewer');
 
-      const check1 = apiKeyManager.checkRateLimit(key.key);
-      const check2 = apiKeyManager.checkRateLimit(key.key);
-      const check3 = apiKeyManager.checkRateLimit(key.key);
+      const check1 = await apiKeyManager.checkRateLimit(key.key);
+      const check2 = await apiKeyManager.checkRateLimit(key.key);
+      const check3 = await apiKeyManager.checkRateLimit(key.key);
 
       expect(check1.allowed).toBe(true);
       expect(check2.allowed).toBe(true);
@@ -77,7 +77,7 @@ describe('Admin: API Usage Statistics Endpoint', () => {
       expect(stats?.requestCount).toBe(2);
     });
 
-    it('should include metadata like tier, role, and description', () => {
+    it('should include metadata like tier, role, and description', async () => {
       apiKeyManager.generateKey(TIER_RATE_LIMITS.enterprise, 'Enterprise API', 'enterprise', 'editor');
 
       const allKeys = apiKeyManager.getAllKeys();
@@ -89,11 +89,11 @@ describe('Admin: API Usage Statistics Endpoint', () => {
       expect(lastKey.rateLimitPerMin).toBe(TIER_RATE_LIMITS.enterprise);
     });
 
-    it('should track lastUsed timestamp', () => {
+    it('should track lastUsed timestamp', async () => {
       const key = apiKeyManager.generateKey(100, 'test', 'free', 'viewer');
 
       const beforeTime = Date.now();
-      apiKeyManager.checkRateLimit(key.key);
+      await apiKeyManager.checkRateLimit(key.key);
       const afterTime = Date.now();
 
       const allKeys = apiKeyManager.getAllKeys();
@@ -104,7 +104,7 @@ describe('Admin: API Usage Statistics Endpoint', () => {
       expect(stats!.lastUsed! <= afterTime).toBe(true);
     });
 
-    it('should show active status for revoked keys', () => {
+    it('should show active status for revoked keys', async () => {
       const key = apiKeyManager.generateKey(100, 'test', 'free', 'viewer');
       const allKeys1 = apiKeyManager.getAllKeys();
       const keyHash = allKeys1[allKeys1.length - 1].keyHash;
@@ -118,7 +118,7 @@ describe('Admin: API Usage Statistics Endpoint', () => {
       expect(revokedKey?.isActive).toBe(false);
     });
 
-    it('should return all keys with stats', () => {
+    it('should return all keys with stats', async () => {
       for (let i = 0; i < 5; i++) {
         apiKeyManager.generateKey(100, `key-${i}`, 'free', 'viewer');
       }

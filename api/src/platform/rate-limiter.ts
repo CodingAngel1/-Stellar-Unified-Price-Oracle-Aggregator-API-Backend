@@ -9,7 +9,13 @@ import {
   rateLimitRedisLatency,
 } from '../observability/metrics';
 
-export type Layer = 'global' | 'tenant' | 'ip' | 'endpoint';
+/**
+ * Layered global/ip/endpoint caps only — defense in depth. The tenant
+ * (per-key) allowance is never decided here: it is authoritative in
+ * `governance/auth.ts` via `platform/limit-model.ts`, so the number reported
+ * in `X-RateLimit-Limit` after authentication is the effective tier limit.
+ */
+export type Layer = 'global' | 'ip' | 'endpoint';
 
 interface Decision {
   allowed: boolean;
@@ -28,7 +34,6 @@ let redisHealthy = false;
 
 const baseLimits: Record<Layer, number> = {
   global: config.rateLimitMax * 10,
-  tenant: config.rateLimitMax,
   ip: config.rateLimitMax,
   endpoint: Math.max(10, Math.floor(config.rateLimitMax / 2)),
 };
@@ -122,35 +127,39 @@ async function increment(key: string, degraded: boolean): Promise<{ count: numbe
 }
 
 async function evaluate(req: Request): Promise<Decision> {
-  const tenant = String(req.headers['x-api-key'] || 'anonymous');
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const endpoint = `${req.method}:${req.route?.path || req.path}`;
   const keys: Array<[Layer, string]> = [
     ['global', 'global'],
-    ['tenant', `tenant:${tenant}`],
     ['ip', `ip:${ip}`],
     ['endpoint', `endpoint:${endpoint}`],
   ];
   const degraded = !(await ensureRedis());
+  let governing: Decision | null = null;
   for (const [layer, key] of keys) {
     const limit = adjustedLimit(layer, req, degraded);
     const cacheKey = `${layer}:${key}:${limit}`;
     const cached = cache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return cached.decision;
-    const { count, reset } = await increment(key, degraded);
-    const decision = {
-      allowed: count <= limit,
-      layer,
-      limit,
-      remaining: Math.max(0, limit - count),
-      reset,
-      consumed: count,
-      degraded,
-    };
-    cache.set(cacheKey, { expires: Date.now() + 50, decision });
+    let decision: Decision;
+    if (cached && cached.expires > Date.now()) {
+      decision = cached.decision;
+    } else {
+      const { count, reset } = await increment(key, degraded);
+      decision = {
+        allowed: count <= limit,
+        layer,
+        limit,
+        remaining: Math.max(0, limit - count),
+        reset,
+        consumed: count,
+        degraded,
+      };
+      cache.set(cacheKey, { expires: Date.now() + 50, decision });
+    }
     if (!decision.allowed) return decision;
+    if (!governing || decision.limit < governing.limit) governing = decision;
   }
-  return { allowed: true, layer: 'endpoint', limit: baseLimits.endpoint, remaining: baseLimits.endpoint, reset: Math.ceil((Date.now() + config.rateLimitWindowMs) / 1000), consumed: 0, degraded };
+  return governing as Decision;
 }
 
 export async function distributedRateLimiter(req: Request, res: Response, next: NextFunction): Promise<void> {

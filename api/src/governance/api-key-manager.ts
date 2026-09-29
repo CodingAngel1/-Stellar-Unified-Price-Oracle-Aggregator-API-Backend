@@ -3,15 +3,11 @@ import { logger } from '../observability/logger';
 import type { Role } from './rbac';
 import { decryptSecret } from './crypto';
 import type { ApiKeyEntry } from '@stellar-oracle/vault-client';
+import { TIER_RATE_LIMITS, effectiveTenantLimit, type RateTier } from '../platform/limit-model';
+import { createTenantWindow, type TenantWindow } from '../platform/tenant-window';
 
-export type KeyTier = 'free' | 'pro' | 'enterprise' | 'admin';
-
-export const TIER_RATE_LIMITS: Record<KeyTier, number> = {
-  free: 60,
-  pro: 500,
-  enterprise: 10000,
-  admin: 100000,
-};
+export type KeyTier = RateTier;
+export { TIER_RATE_LIMITS };
 
 export interface ApiKeyMetadata {
   keyHash: string;
@@ -42,9 +38,8 @@ export interface ApiKeyStore {
 export class ApiKeyManager {
   /** Keyed by SHA-256 hash of the API key — plaintext keys are never retained. */
   private keys: Map<string, ApiKeyMetadata> = new Map();
-  private lastMinuteRequests: Map<string, number[]> = new Map();
 
-  constructor() {
+  constructor(private window: TenantWindow = createTenantWindow()) {
     this.loadKeysFromEnv();
   }
 
@@ -58,7 +53,7 @@ export class ApiKeyManager {
       lastUsed: null,
       requestCount: 0,
       isActive: true,
-      rateLimitPerMin,
+      rateLimitPerMin: effectiveTenantLimit(tier, rateLimitPerMin),
       tier,
       role,
       scopes: scopes && scopes.length > 0 ? [...scopes] : undefined,
@@ -90,36 +85,45 @@ export class ApiKeyManager {
     return !!metadata && metadata.role === 'admin';
   }
 
-  checkRateLimit(key: string): { allowed: boolean; remaining: number; resetTime: number; retryAfter?: number } {
+  /**
+   * The authoritative tenant allowance: one shared fixed window per key hash
+   * (Redis-backed across replicas when configured, per-pod otherwise) using
+   * the effective limit from the limit model. `limit` is the number actually
+   * enforced and the value reported in `X-RateLimit-Limit`.
+   */
+  async checkRateLimit(key: string): Promise<{
+    allowed: boolean;
+    remaining: number;
+    resetTime: number;
+    retryAfter?: number;
+    limit: number;
+    degraded: boolean;
+    mode: 'shared-redis' | 'local-per-pod';
+  }> {
     const keyHash = this.hashKey(key);
     const metadata = this.keys.get(keyHash);
     if (!metadata) {
-      return { allowed: false, remaining: 0, resetTime: 0 };
+      return { allowed: false, remaining: 0, resetTime: 0, limit: 0, degraded: false, mode: 'local-per-pod' };
     }
 
-    const now = Date.now();
-    const windowMs = 60000;
-    const oneMinuteAgo = now - windowMs;
+    const limit = effectiveTenantLimit(metadata.tier, metadata.rateLimitPerMin);
+    const result = await this.window.consume(keyHash, limit);
+    const resetTime = result.reset * 1000;
 
-    let requests = this.lastMinuteRequests.get(keyHash) || [];
-    requests = requests.filter((ts) => ts > oneMinuteAgo);
-
-    if (requests.length >= metadata.rateLimitPerMin) {
-      const oldestRequest = Math.min(...requests);
-      const resetTime = oldestRequest + windowMs;
-      const retryAfter = Math.ceil((resetTime - now) / 1000);
-
-      return { allowed: false, remaining: 0, resetTime, retryAfter };
+    if (result.allowed) {
+      metadata.lastUsed = Date.now();
+      metadata.requestCount++;
     }
 
-    requests.push(now);
-    this.lastMinuteRequests.set(keyHash, requests);
-
-    metadata.lastUsed = now;
-    metadata.requestCount++;
-
-    const remaining = metadata.rateLimitPerMin - requests.length;
-    return { allowed: true, remaining, resetTime: now + windowMs };
+    return {
+      allowed: result.allowed,
+      remaining: result.remaining,
+      resetTime,
+      retryAfter: result.allowed ? undefined : Math.max(1, result.reset - Math.floor(Date.now() / 1000)),
+      limit: result.limit,
+      degraded: !result.shared,
+      mode: result.mode,
+    };
   }
 
   rotateKey(oldKeyHash: string): GeneratedApiKey | null {
@@ -139,7 +143,6 @@ export class ApiKeyManager {
     };
 
     this.keys.delete(oldKeyHash);
-    this.lastMinuteRequests.delete(oldKeyHash);
     this.keys.set(newHash, newMetadata);
     logger.info(`Rotated API key: old=${metadata.keyPrefix}... new=${newMetadata.keyPrefix}...`);
 
@@ -198,8 +201,11 @@ export class ApiKeyManager {
     const metadata = this.keys.get(keyHash);
     if (!metadata) return false;
 
-    metadata.rateLimitPerMin = newLimit;
-    logger.info(`Updated rate limit for ${metadata.keyPrefix}... to ${newLimit}/min`);
+    const effective = effectiveTenantLimit(metadata.tier, newLimit);
+    metadata.rateLimitPerMin = effective;
+    logger.info(
+      `Updated rate limit for ${metadata.keyPrefix}... to ${effective}/min (tier=${metadata.tier}, ceiling applies)`,
+    );
     return true;
   }
 
@@ -217,7 +223,6 @@ export class ApiKeyManager {
     const metadata = this.keys.get(keyHash);
     const result = this.keys.delete(keyHash);
     if (result) {
-      this.lastMinuteRequests.delete(keyHash);
       logger.info(`Deleted API key: ${metadata!.keyPrefix}...`);
     }
     return result;
@@ -305,7 +310,7 @@ export class ApiKeyManager {
             lastUsed: null,
             requestCount: 0,
             isActive: true,
-            rateLimitPerMin: isNaN(limit) ? TIER_RATE_LIMITS[tier] : limit,
+            rateLimitPerMin: effectiveTenantLimit(tier, isNaN(limit) ? undefined : limit),
             tier,
             role,
             description,

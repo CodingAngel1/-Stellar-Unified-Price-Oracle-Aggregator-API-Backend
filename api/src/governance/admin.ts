@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { apiKeyManager, TIER_RATE_LIMITS, KeyTier } from './api-key-manager';
+import { clampOverride } from '../platform/limit-model';
 import { corsManager } from './cors-manager';
 import { adminAuthMiddleware } from './auth';
 import { logger } from '../observability/logger';
@@ -173,8 +174,19 @@ router.put('/keys/:keyHash/rate-limit', (req: Request, res: Response) => {
     });
   }
 
-  apiKeyManager.updateRateLimit(req.params.keyHash, rateLimitPerMin);
-  res.json({ success: true, data: { keyHash: req.params.keyHash, rateLimitPerMin } });
+  const decision = clampOverride(existing.tier, rateLimitPerMin);
+  apiKeyManager.updateRateLimit(req.params.keyHash, decision.effective);
+  res.json({
+    success: true,
+    data: {
+      keyHash: req.params.keyHash,
+      tier: existing.tier,
+      rateLimitPerMin: decision.effective,
+      requested: decision.requested,
+      ceiling: decision.ceiling,
+      clamped: decision.clamped,
+    },
+  });
 });
 
 router.post('/keys/:keyHash/revoke', (req: Request, res: Response) => {

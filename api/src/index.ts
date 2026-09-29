@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import { config } from './infrastructure/config';
 import { corsManager } from './governance/cors-manager';
@@ -17,6 +16,7 @@ import { httpsRedirect, hstsHeaders } from './infrastructure/https';
 import { compressionMiddleware } from './infrastructure/compression';
 import { usageTrackingMiddleware } from './governance/usage-tracking';
 import { complianceAuditMiddleware } from './governance/compliance';
+import { distributedRateLimiter } from './platform/rate-limiter';
 import { PriceWebSocketServer } from './infrastructure/server';
 import { swaggerSpec } from './infrastructure/openapi';
 import v1Routes, { initializeCache } from './price-serving/v1';
@@ -30,8 +30,6 @@ import { DataConsistencyChecker } from './infrastructure/data-consistency';
 import { BackupService } from './infrastructure/backup';
 import { setDatabase } from './price-serving/price-store';
 import { initializeTracing } from './observability/tracing';
-import { AppError } from './infrastructure/app-error';
-import { ErrorCode } from './infrastructure/catalog';
 import platformRoutes from './platform/routes';
 import adminRoutes from './governance/admin';
 import selfServiceRoutes from './governance/self-service';
@@ -159,24 +157,7 @@ app.use(requestLogger);
 app.use(metricsMiddleware);
 app.use(usageTrackingMiddleware);
 app.use(complianceAuditMiddleware);
-app.use(
-  rateLimit({
-    windowMs: config.rateLimitWindowMs,
-    max: config.rateLimitMax,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => req.path === '/metrics',
-    handler: (req, res) => {
-      const error = new AppError(
-        ErrorCode.RATE_LIMITED,
-        'Too many requests. Please try again later.',
-        undefined,
-        req.path,
-      );
-      res.status(error.status).json(error.toResponseObject());
-    },
-  }),
-);
+app.use(distributedRateLimiter);
 
 // Apply authentication to price endpoints
 app.use('/api/v1/prices', authMiddleware);

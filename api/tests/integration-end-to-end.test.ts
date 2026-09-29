@@ -20,6 +20,8 @@ vi.mock('../src/governance/api-key-manager', () => ({
       allowed: true,
       remaining: 999,
       resetTime: Date.now() + 60000,
+      limit: 1000,
+      degraded: false,
     })),
     isAdminKey: vi.fn(() => true),
   },
