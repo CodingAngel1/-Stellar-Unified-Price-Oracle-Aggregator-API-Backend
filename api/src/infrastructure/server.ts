@@ -7,6 +7,7 @@ import { HybridCache } from '../price-serving/cache';
 import { ClientMessageType, ServerMessageType } from './ws-messages';
 import { validateWsAssets } from '../governance/sanitization';
 import { webhookService } from '../webhooks/webhook-service';
+import { clientIp as trustedClientIp } from '../platform/trusted-proxy';
 import { config } from './config';
 import { WsUpgradeGuard } from './upgrade-guard';
 import {
@@ -329,11 +330,7 @@ export class PriceWebSocketServer {
   }
 
   private clientIp(req: IncomingMessage): string {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string' && forwarded.length > 0) {
-      return forwarded.split(',')[0].trim();
-    }
-    return req.socket.remoteAddress || 'unknown';
+    return trustedClientIp(req);
   }
 
   stop(): void {

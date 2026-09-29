@@ -3,6 +3,7 @@ import { config } from './config';
 import { logger } from '../observability/logger';
 import { verifyWsCsrfToken, isCsrfEnabled } from './csrf';
 import { verifyWsSignature } from '../governance/ws-signing';
+import { clientIp as trustedClientIp } from '../platform/trusted-proxy';
 
 /**
  * Validates WebSocket upgrade requests before a connection is accepted
@@ -121,11 +122,7 @@ export class WsUpgradeGuard {
   }
 
   private clientIp(req: IncomingMessage): string {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string' && forwarded.length > 0) {
-      return forwarded.split(',')[0].trim();
-    }
-    return req.socket.remoteAddress || 'unknown';
+    return trustedClientIp(req);
   }
 
   private queryParam(req: IncomingMessage, key: string): string | undefined {
