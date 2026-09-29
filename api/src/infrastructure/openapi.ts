@@ -358,6 +358,13 @@ const options: swaggerJsdoc.Options = {
           responses: { 201: { description: 'Webhook created' } },
         },
       },
+      '/api/v1/webhooks/verification-key': {
+        get: {
+          tags: ['Webhooks'],
+          summary: 'Signature scheme, signed-payload semantics and conformance test vector',
+          responses: { 200: { description: 'Verification material (never key material)' } },
+        },
+      },
       '/api/v1/webhooks/{id}': {
         get: { tags: ['Webhooks'], summary: 'Get a webhook', responses: { 200: { description: 'Webhook' } } },
         delete: { tags: ['Webhooks'], summary: 'Delete a webhook', responses: { 204: { description: 'Deleted' } } },

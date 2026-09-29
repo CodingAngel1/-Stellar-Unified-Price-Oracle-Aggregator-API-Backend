@@ -17,8 +17,8 @@ export interface WebhookRegistration {
   url: string;
   apiKeyPrefix: string;
   trigger: WebhookTrigger;
+  /** Per-registration HMAC secret. Returned exactly once, in the registration response. */
   secret: string;
-  verificationKey: string;
   active: boolean;
   status: 'healthy' | 'degraded' | 'dead-letter';
   createdAt: number;
@@ -44,8 +44,21 @@ function backoffDelayMs(attempt: number): number {
   return Math.min(delay, config.webhooks.maxDelayMs);
 }
 
+export const WEBHOOK_SIGNATURE_ALGORITHM = 'HMAC-SHA256';
+export const WEBHOOK_SIGNATURE_HEADER = 'X-Webhook-Signature';
+export const WEBHOOK_SIGNATURE_FORMAT = 'sha256=<lowercase hex>';
+
 export function signWebhookPayload(secret: string, body: string): string {
   return crypto.createHmac('sha256', secret).update(body).digest('hex');
+}
+
+/**
+ * The exact bytes that get signed and sent: JSON.stringify inserts no spaces,
+ * and the signature covers those bytes, so verification must hash the raw
+ * request body rather than a re-serialised object.
+ */
+export function buildWebhookBody(webhookId: string, payload: Record<string, unknown>): string {
+  return JSON.stringify({ webhookId, ...payload });
 }
 
 export function verifyWebhookSignature(secret: string, body: string, signature: string): boolean {
@@ -75,15 +88,13 @@ class WebhookService {
     apiKeyPrefix: string,
     trigger: WebhookTrigger,
   ): WebhookRegistration {
-    const secret = randomUUID();
-    const verificationKey = crypto.createHash('sha256').update(secret).digest('hex');
+    const secret = crypto.randomBytes(32).toString('hex');
     const webhook: WebhookRegistration = {
       id: randomUUID(),
       url,
       apiKeyPrefix,
       trigger,
       secret,
-      verificationKey,
       active: true,
       status: 'healthy',
       createdAt: Date.now(),
@@ -106,7 +117,6 @@ class WebhookService {
       await vault.saveWebhookSecret(webhook.apiKeyPrefix, {
         webhookId: webhook.id,
         secret: webhook.secret,
-        verificationKey: webhook.verificationKey,
         apiKeyPrefix: webhook.apiKeyPrefix,
         createdAt: webhook.createdAt,
       });
@@ -170,7 +180,7 @@ class WebhookService {
    * but never throw, since this runs from background price-update fan-out.
    */
   async deliver(webhook: WebhookRegistration, payload: Record<string, unknown>): Promise<void> {
-    const body = JSON.stringify({ webhookId: webhook.id, ...payload });
+    const body = buildWebhookBody(webhook.id, payload);
     const signature = signWebhookPayload(webhook.secret, body);
     let attempt = 0;
 
@@ -184,7 +194,7 @@ class WebhookService {
           headers: {
             'Content-Type': 'application/json',
             'X-Webhook-Id': webhook.id,
-            'X-Webhook-Signature': `sha256=${signature}`,
+            [WEBHOOK_SIGNATURE_HEADER]: `sha256=${signature}`,
             'X-Webhook-Timestamp': String(Math.floor(Date.now() / 1000)),
           },
           body,
