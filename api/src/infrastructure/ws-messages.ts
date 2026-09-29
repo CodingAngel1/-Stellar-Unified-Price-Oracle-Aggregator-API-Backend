@@ -45,8 +45,11 @@ export interface ConnectedMessage {
   type: ServerMessageType.Connected;
   clientCount: number;
   sequenceId: number;
+  sequenceModel: 'global';
   replaySupported: boolean;
   bufferSize: number;
+  replayMaxMessages: number;
+  replayMaxBytes: number;
 }
 
 export interface ErrorMessage {
@@ -74,10 +77,19 @@ export interface PriceUpdateMessage {
   asset?: string;
 }
 
+/**
+ * ReplayCompleteMessage.truncated tells a client whether it is caught up
+ * (false: every buffered message above lastSequenceId was delivered) or the
+ * bounded window was exhausted (true: `remaining` messages were withheld, so
+ * the client must resync from `lastSequenceId` or resubscribe).
+ */
 export interface ReplayCompleteMessage {
   type: ServerMessageType.ReplayComplete;
   replayed: number;
   sequenceId: number;
+  lastSequenceId: number;
+  truncated: boolean;
+  remaining: number;
 }
 
 export interface PongMessage {

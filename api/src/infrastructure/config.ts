@@ -98,6 +98,14 @@ export const config = {
     rateLimitWindowMs: parseInt(process.env.WS_RATE_LIMIT_WINDOW_MS || '60000', 10),
     maxConcurrentConnectionsPerIp: parseInt(process.env.WS_MAX_CONCURRENT_CONNECTIONS_PER_IP || '10', 10),
     hmacSecret: secretEnv('WS_HMAC_SECRET'),
+    // Replay bounding and buffer caps (issue #606)
+    bufferSize: parseInt(process.env.WS_BUFFER_SIZE || '200', 10),
+    bufferMaxAssets: parseInt(process.env.WS_BUFFER_MAX_ASSETS || '64', 10),
+    bufferMaxBytes: parseInt(process.env.WS_BUFFER_MAX_BYTES || '8388608', 10),
+    replayMaxMessages: parseInt(process.env.WS_REPLAY_MAX_MESSAGES || '200', 10),
+    replayMaxBytes: parseInt(process.env.WS_REPLAY_MAX_BYTES || '262144', 10),
+    replayRateLimit: parseInt(process.env.WS_REPLAY_RATE_LIMIT || '10', 10),
+    replayRateWindowMs: parseInt(process.env.WS_REPLAY_RATE_WINDOW_MS || '60000', 10),
   },
   // Encryption at rest for sensitive config + historical data (issue #41).
   encryption: {

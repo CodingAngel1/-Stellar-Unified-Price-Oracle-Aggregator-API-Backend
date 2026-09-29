@@ -194,6 +194,27 @@ export const wsSubscribeEventsTotal = new client.Counter({
 });
 register.registerMetric(wsSubscribeEventsTotal);
 
+// ── WebSocket replay bounding (issue #606) ───────────────────────────────────
+
+export const wsReplayTotal = new client.Counter({
+  name: 'ws_api_replay_requests_total',
+  help: 'Total replay requests by outcome: complete, truncated or rate_limited',
+  labelNames: ['result'],
+});
+register.registerMetric(wsReplayTotal);
+
+export const wsBufferedAssets = new client.Gauge({
+  name: 'ws_api_buffered_assets',
+  help: 'Number of assets currently holding a replay buffer',
+});
+register.registerMetric(wsBufferedAssets);
+
+export const wsBufferBytes = new client.Gauge({
+  name: 'ws_api_buffer_bytes',
+  help: 'Approximate bytes retained across all replay buffers',
+});
+register.registerMetric(wsBufferBytes);
+
 export const apiCallsByEndpoint = new client.Counter({
   name: 'api_calls_by_endpoint_total',
   help: 'Total API calls grouped by endpoint, method, and status',
