@@ -9,3 +9,12 @@ target/
 .terraform/
 .kiro/
 .claude/
+
+# Formal-verification scratch (pinned tools are downloaded, reports are built)
+verification/tools/
+verification/tlc-work/
+verification/reports/
+specs/states/
+specs/*_TTrace_*.tla
+/states/
+
