@@ -224,6 +224,28 @@ export const graphqlRequestsTotal = new client.Counter({
 });
 register.registerMetric(graphqlRequestsTotal);
 
+// ── Audit chain integrity (issue #598) ───────────────────────────────────────
+
+export const auditEventsTotal = new client.Counter({
+  name: 'audit_events_total',
+  help: 'Total audit events by outcome: appended or refused',
+  labelNames: ['result'],
+});
+register.registerMetric(auditEventsTotal);
+
+export const auditChainValid = new client.Gauge({
+  name: 'audit_chain_valid',
+  help: '1 when the audit log chain is verifiable, 0 after a break or fork',
+});
+register.registerMetric(auditChainValid);
+
+export const auditChainVerificationTotal = new client.Counter({
+  name: 'audit_chain_verifications_total',
+  help: 'Total audit chain verifications by result: passed, failed, forked or error',
+  labelNames: ['result'],
+});
+register.registerMetric(auditChainVerificationTotal);
+
 export const apiCallsByEndpoint = new client.Counter({
   name: 'api_calls_by_endpoint_total',
   help: 'Total API calls grouped by endpoint, method, and status',
