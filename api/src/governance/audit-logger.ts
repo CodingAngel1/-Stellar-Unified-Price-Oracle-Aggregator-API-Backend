@@ -238,7 +238,8 @@ export function verifyAuditLogChain(entries: AuditEntry[]): {
       if (!secret) {
         return { valid: false, firstInvalidIndex: index };
       }
-      const { hmac: _hmac, ...fields } = entry;
+      const fields: Partial<AuditEntry> = { ...entry };
+      delete fields.hmac;
       if (hmacWith(secret, fields, entry.prevHmac ?? '') !== entry.hmac) {
         return { valid: false, firstInvalidIndex: index };
       }
