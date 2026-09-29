@@ -215,6 +215,15 @@ export const wsBufferBytes = new client.Gauge({
 });
 register.registerMetric(wsBufferBytes);
 
+// ── GraphQL preview surface (issue #607) ─────────────────────────────────────
+
+export const graphqlRequestsTotal = new client.Counter({
+  name: 'graphql_requests_total',
+  help: 'Total GraphQL requests by outcome: success, error, rejected, timeout, disabled, tier_forbidden',
+  labelNames: ['result'],
+});
+register.registerMetric(graphqlRequestsTotal);
+
 export const apiCallsByEndpoint = new client.Counter({
   name: 'api_calls_by_endpoint_total',
   help: 'Total API calls grouped by endpoint, method, and status',

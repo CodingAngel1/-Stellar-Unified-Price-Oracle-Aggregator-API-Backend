@@ -112,6 +112,20 @@ export const config = {
     key: process.env.ENCRYPTION_KEY || '',
     previousKey: process.env.ENCRYPTION_KEY_PREVIOUS || '',
   },
+  // GraphQL preview surface (issue #607). Disabled unless explicitly enabled.
+  graphql: {
+    enabled: process.env.GRAPHQL_ENABLED === 'true',
+    introspection: process.env.GRAPHQL_INTROSPECTION === 'true',
+    maxDepth: parseInt(process.env.GRAPHQL_MAX_DEPTH || '5', 10),
+    maxComplexity: parseInt(process.env.GRAPHQL_MAX_COMPLEXITY || '100', 10),
+    timeoutMs: parseInt(process.env.GRAPHQL_TIMEOUT_MS || '5000', 10),
+    maxQueryLength: parseInt(process.env.GRAPHQL_MAX_QUERY_LENGTH || '10000', 10),
+    maxLimit: parseInt(process.env.GRAPHQL_MAX_LIMIT || '25', 10),
+    allowedTiers: (process.env.GRAPHQL_ALLOWED_TIERS || 'pro,enterprise')
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean),
+  },
   tracing: {
     enabled: process.env.TRACING_ENABLED === 'true',
     otlpEndpoint: process.env.OTLP_TRACE_ENDPOINT || process.env.JAEGER_ENDPOINT,
