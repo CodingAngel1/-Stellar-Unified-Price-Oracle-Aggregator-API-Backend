@@ -41,8 +41,9 @@ import governanceRoutes from './governance/proposal-routes';
 import { uptimeTracker } from './observability/uptime-tracker';
 import { getVaultClient } from '@stellar-oracle/vault-client';
 import { apiKeyManager } from './governance/api-key-manager';
+import { initializeAuditIntegrity, startAuditChainVerification } from './governance/audit-logger';
 import webhooksRoutes from './webhooks/webhooks';
-import graphqlRoutes from './graphql';
+import graphqlRoutes, { initializeGraphqlCache } from './graphql';
 import releaseNotesRoutes from './release-notes/router';
 
 // Initialize distributed tracing
@@ -140,6 +141,7 @@ const cache = new HybridCache<unknown>(logger, {
 initializeCache(cache);
 initializeCacheV2(cache);
 initializeSandboxCache(cache);
+initializeGraphqlCache(cache);
 
 app.use(helmet());
 app.use(cors(corsManager.getCorsOptions()));
@@ -208,6 +210,9 @@ app.use(errorHandler);
 
 async function startServer(): Promise<void> {
   await initializeApp();
+
+  initializeAuditIntegrity();
+  startAuditChainVerification();
 
   const startupDurationMs = Date.now() - startupStartedAt;
   serviceStartupDurationMs.set({ service: 'api' }, startupDurationMs);

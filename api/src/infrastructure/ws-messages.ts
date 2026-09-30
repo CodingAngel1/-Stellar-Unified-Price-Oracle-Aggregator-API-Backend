@@ -45,10 +45,11 @@ export interface ConnectedMessage {
   type: ServerMessageType.Connected;
   clientCount: number;
   sequenceId: number;
+  sequenceModel: 'global';
   replaySupported: boolean;
   bufferSize: number;
-  /** Price frames are only delivered for subscribed assets; see docs/websocket-message-contract.md */
-  subscriptionRequired?: boolean;
+  replayMaxMessages: number;
+  replayMaxBytes: number;
 }
 
 export interface ErrorMessage {
@@ -76,14 +77,19 @@ export interface PriceUpdateMessage {
   asset?: string;
 }
 
+/**
+ * ReplayCompleteMessage.truncated tells a client whether it is caught up
+ * (false: every buffered message above lastSequenceId was delivered) or the
+ * bounded window was exhausted (true: `remaining` messages were withheld, so
+ * the client must resync from `lastSequenceId` or resubscribe).
+ */
 export interface ReplayCompleteMessage {
   type: ServerMessageType.ReplayComplete;
   replayed: number;
   sequenceId: number;
-  /** Assets actually replayed: requested assets intersected with this connection's subscriptions. */
-  assets?: string[];
-  /** Replay scope is always the connection's subscription set. */
-  scope?: 'subscriptions';
+  lastSequenceId: number;
+  truncated: boolean;
+  remaining: number;
 }
 
 export interface PongMessage {

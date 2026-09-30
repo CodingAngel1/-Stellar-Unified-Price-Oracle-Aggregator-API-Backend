@@ -17,24 +17,20 @@ import {
   wsConnectionDuration,
   wsErrorsTotal,
   wsSubscribeEventsTotal,
-  wsClientMessagesTotal,
-  wsClientSubscriptions,
+  wsReplayTotal,
+  wsBufferedAssets,
+  wsBufferBytes,
 } from '../observability/metrics';
+import { ReplayBuffer, ReplayRateLimiter, collectReplayWindow, BufferedMessage } from './ws-replay';
 
 // Circular message buffer per asset for replay support
-const MESSAGE_BUFFER_SIZE = parseInt(process.env.WS_BUFFER_SIZE || '200', 10);
+const MESSAGE_BUFFER_SIZE = config.ws.bufferSize;
+const REPLAY_BOUNDS = { maxMessages: config.ws.replayMaxMessages, maxBytes: config.ws.replayMaxBytes };
 
 interface PriceUpdatePayload {
   asset?: string;
   price?: number;
   [key: string]: unknown;
-}
-
-interface BufferedMessage {
-  sequenceId: number;
-  asset: string;
-  timestamp: number;
-  data: PriceUpdatePayload;
 }
 
 let globalSequence = 0;
@@ -52,8 +48,15 @@ export class PriceWebSocketServer {
   private clientIds: Map<WebSocket, string> = new Map();
   private cache: HybridCache<unknown> | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
-  // Per-asset circular message buffer for replay on reconnect
-  private messageBuffers: Map<string, BufferedMessage[]> = new Map();
+  // Bounded per-asset replay buffer (issue #606)
+  private replayBuffer = new ReplayBuffer(
+    config.ws.bufferMaxAssets,
+    MESSAGE_BUFFER_SIZE,
+    config.ws.bufferMaxBytes,
+  );
+  private replayLimiter = new ReplayRateLimiter(config.ws.replayRateLimit, config.ws.replayRateWindowMs);
+  private connectionKeys: Map<WebSocket, string> = new Map();
+  private connectionSeq = 0;
 
   constructor(port: number) {
     this.port = port;
@@ -78,8 +81,7 @@ export class PriceWebSocketServer {
       const clientId = randomUUID().slice(0, 8);
       this.clients.add(ws);
       this.subscriptions.set(ws, new Set());
-      this.clientIds.set(ws, clientId);
-      wsClientSubscriptions.set({ client: clientId }, 0);
+      this.connectionKeys.set(ws, `${ip}#${++this.connectionSeq}`);
 
       wsConnectionsActive.inc();
       wsConnectionsTotal.inc();
@@ -98,7 +100,9 @@ export class PriceWebSocketServer {
 
       ws.on('close', () => {
         this.guard.onDisconnect(ip);
-        this.forget(ws);
+        this.clients.delete(ws);
+        this.subscriptions.delete(ws);
+        this.connectionKeys.delete(ws);
         wsConnectionsActive.dec();
         wsConnectionDuration.observe((Date.now() - connectedAt) / 1000);
         logger.info(`WS client disconnected (total: ${this.clients.size})`);
@@ -107,22 +111,29 @@ export class PriceWebSocketServer {
       ws.on('error', (err) => {
         wsErrorsTotal.inc();
         logger.error('WS error', err);
-        this.forget(ws);
+        this.clients.delete(ws);
+        this.subscriptions.delete(ws);
+        this.connectionKeys.delete(ws);
       });
 
       ws.send(JSON.stringify({
         type: ServerMessageType.Connected,
         clientCount: this.clients.size,
         sequenceId: globalSequence,
+        sequenceModel: 'global',
         replaySupported: true,
         bufferSize: MESSAGE_BUFFER_SIZE,
-        subscriptionRequired: true,
+        replayMaxMessages: REPLAY_BOUNDS.maxMessages,
+        replayMaxBytes: REPLAY_BOUNDS.maxBytes,
       }));
     });
 
     logger.info(`WebSocket server on port ${this.port}`);
 
-    this.sweepTimer = setInterval(() => this.guard.sweep(), config.ws.rateLimitWindowMs);
+    this.sweepTimer = setInterval(() => {
+      this.guard.sweep();
+      this.replayLimiter.prune();
+    }, config.ws.rateLimitWindowMs);
   }
 
   private handleMessage(ws: WebSocket, msg: unknown): void {
@@ -166,7 +177,7 @@ export class PriceWebSocketServer {
         // Client reconnected and wants missed messages since lastSequenceId
         const lastSeqRaw = m.lastSequenceId;
         const assets = m.assets;
-        if (typeof lastSeqRaw !== 'number' || lastSeqRaw < 0) {
+        if (typeof lastSeqRaw !== 'number' || lastSeqRaw < 0 || !Number.isInteger(lastSeqRaw)) {
           ws.send(JSON.stringify({ type: ServerMessageType.Error, message: 'replay requires numeric lastSequenceId' }));
           return;
         }
@@ -175,7 +186,17 @@ export class PriceWebSocketServer {
           return;
         }
 
-        const subscribed = this.subscriptions.get(ws) ?? new Set<string>();
+        const key = this.connectionKeys.get(ws) ?? 'unknown';
+        if (!this.replayLimiter.allow(key)) {
+          wsReplayTotal.inc({ result: 'rate_limited' });
+          ws.send(JSON.stringify({
+            type: ServerMessageType.Error,
+            code: 'REPLAY_RATE_LIMITED',
+            message: `replay is limited to ${config.ws.replayRateLimit} requests per ${config.ws.replayRateWindowMs}ms; resubscribe to resume from ${globalSequence}`,
+          }));
+          return;
+        }
+
         const requestedAssets = assets
           ? (assets as string[]).map((a) => a.toUpperCase())
           : null;
@@ -186,32 +207,29 @@ export class PriceWebSocketServer {
           ? requestedAssets.filter((a) => subscribed.has(a))
           : Array.from(subscribed);
 
+        const window = collectReplayWindow(
+          this.replayBuffer.sources(requestedAssets),
+          lastSeqRaw,
+          REPLAY_BOUNDS,
+        );
+
         let replayed = 0;
-        const missed: BufferedMessage[] = [];
-        for (const asset of scopeAssets) {
-          for (const entry of this.messageBuffers.get(asset) || []) {
-            if (entry.sequenceId > lastSeqRaw) {
-              missed.push(entry);
-            }
-          }
-        }
-        missed.sort((a, b) => a.sequenceId - b.sequenceId);
-
-        for (const entry of missed) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: ServerMessageType.PriceUpdate, replayed: true, sequenceId: entry.sequenceId, data: entry.data }));
-            replayed++;
-            const clientId = this.clientIds.get(ws);
-            if (clientId) wsClientMessagesTotal.inc({ client: clientId, result: 'delivered' });
-          }
+        let lastDelivered = lastSeqRaw;
+        for (const entry of window.messages) {
+          if (ws.readyState !== WebSocket.OPEN) break;
+          ws.send(JSON.stringify({ type: ServerMessageType.PriceUpdate, replayed: true, sequenceId: entry.sequenceId, data: entry.data }));
+          replayed++;
+          lastDelivered = entry.sequenceId;
         }
 
+        wsReplayTotal.inc({ result: window.truncated ? 'truncated' : 'complete' });
         ws.send(JSON.stringify({
           type: ServerMessageType.ReplayComplete,
           replayed,
           sequenceId: globalSequence,
-          assets: scopeAssets,
-          scope: 'subscriptions',
+          lastSequenceId: lastDelivered,
+          truncated: window.truncated,
+          remaining: window.remaining,
         }));
         break;
       }
@@ -227,15 +245,10 @@ export class PriceWebSocketServer {
   private bufferMessage(asset: string, data: PriceUpdatePayload): number {
     const seq = nextSeq();
     const entry: BufferedMessage = { sequenceId: seq, asset, timestamp: Math.floor(Date.now() / 1000), data };
-
-    if (!this.messageBuffers.has(asset)) {
-      this.messageBuffers.set(asset, []);
-    }
-    const buf = this.messageBuffers.get(asset)!;
-    buf.push(entry);
-    if (buf.length > MESSAGE_BUFFER_SIZE) {
-      buf.shift();
-    }
+    this.replayBuffer.push(asset, entry);
+    const stats = this.replayBuffer.stats();
+    wsBufferedAssets.set(stats.assets);
+    wsBufferBytes.set(stats.bytes);
     return seq;
   }
 
@@ -336,9 +349,12 @@ export class PriceWebSocketServer {
   stop(): void {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.wss?.close();
-    for (const client of Array.from(this.clients)) {
-      this.forget(client);
-    }
-    this.messageBuffers.clear();
+    this.clients.clear();
+    this.subscriptions.clear();
+    this.connectionKeys.clear();
+    this.replayLimiter.reset();
+    this.replayBuffer.clear();
+    wsBufferedAssets.set(0);
+    wsBufferBytes.set(0);
   }
 }

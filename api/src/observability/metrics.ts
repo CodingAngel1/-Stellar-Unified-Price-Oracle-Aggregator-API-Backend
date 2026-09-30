@@ -194,19 +194,57 @@ export const wsSubscribeEventsTotal = new client.Counter({
 });
 register.registerMetric(wsSubscribeEventsTotal);
 
-export const wsClientMessagesTotal = new client.Counter({
-  name: 'ws_api_client_messages_total',
-  help: 'Price messages per WebSocket connection, split by subscription-filter delivery result',
-  labelNames: ['client', 'result'],
-});
-register.registerMetric(wsClientMessagesTotal);
+// ── WebSocket replay bounding (issue #606) ───────────────────────────────────
 
-export const wsClientSubscriptions = new client.Gauge({
-  name: 'ws_api_client_subscriptions',
-  help: 'Current number of subscribed assets per WebSocket connection; 0 means the connection receives no price frames',
-  labelNames: ['client'],
+export const wsReplayTotal = new client.Counter({
+  name: 'ws_api_replay_requests_total',
+  help: 'Total replay requests by outcome: complete, truncated or rate_limited',
+  labelNames: ['result'],
 });
-register.registerMetric(wsClientSubscriptions);
+register.registerMetric(wsReplayTotal);
+
+export const wsBufferedAssets = new client.Gauge({
+  name: 'ws_api_buffered_assets',
+  help: 'Number of assets currently holding a replay buffer',
+});
+register.registerMetric(wsBufferedAssets);
+
+export const wsBufferBytes = new client.Gauge({
+  name: 'ws_api_buffer_bytes',
+  help: 'Approximate bytes retained across all replay buffers',
+});
+register.registerMetric(wsBufferBytes);
+
+// ── GraphQL preview surface (issue #607) ─────────────────────────────────────
+
+export const graphqlRequestsTotal = new client.Counter({
+  name: 'graphql_requests_total',
+  help: 'Total GraphQL requests by outcome: success, error, rejected, timeout, disabled, tier_forbidden',
+  labelNames: ['result'],
+});
+register.registerMetric(graphqlRequestsTotal);
+
+// ── Audit chain integrity (issue #598) ───────────────────────────────────────
+
+export const auditEventsTotal = new client.Counter({
+  name: 'audit_events_total',
+  help: 'Total audit events by outcome: appended or refused',
+  labelNames: ['result'],
+});
+register.registerMetric(auditEventsTotal);
+
+export const auditChainValid = new client.Gauge({
+  name: 'audit_chain_valid',
+  help: '1 when the audit log chain is verifiable, 0 after a break or fork',
+});
+register.registerMetric(auditChainValid);
+
+export const auditChainVerificationTotal = new client.Counter({
+  name: 'audit_chain_verifications_total',
+  help: 'Total audit chain verifications by result: passed, failed, forked or error',
+  labelNames: ['result'],
+});
+register.registerMetric(auditChainVerificationTotal);
 
 export const apiCallsByEndpoint = new client.Counter({
   name: 'api_calls_by_endpoint_total',
