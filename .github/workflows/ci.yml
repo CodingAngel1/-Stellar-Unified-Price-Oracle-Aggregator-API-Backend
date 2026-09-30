@@ -101,6 +101,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Java (TLC)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -109,7 +115,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Install pinned verification tools
+        run: node scripts/install-verification-tools.mjs
+
       - name: Cargo tests and property checks
+        id: cargo_test
         run: cargo test
         working-directory: contracts/price-oracle
 
@@ -118,22 +128,28 @@ jobs:
         working-directory: contracts/price-oracle
 
       - name: Generate verification report
+        if: always()
+        env:
+          CARGO_TEST_OUTCOME: ${{ steps.cargo_test.outcome }}
         run: node scripts/generate-verification-report.mjs
 
       - name: Upload verification report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: price-oracle-verification-report
-          path: verification/reports/latest.md
+          path: verification/reports/
           retention-days: 30
 
       - name: Post verification report
-        if: github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('verification/reports/latest.md', 'utf8');
+            const path = 'verification/reports/latest.md';
+            if (!fs.existsSync(path)) return;
+            const body = fs.readFileSync(path, 'utf8');
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
